@@ -11,7 +11,6 @@ import sys
 import argparse
 import time
 from datetime import datetime
-import tqdm as tqdm_module
 import numpy as np
 import torch
 import torch.nn as nn
@@ -211,7 +210,7 @@ if __name__ == '__main__':
         resume_epoch = last_epoch(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
 
 
-    for epoch in tqdm_module(range(1, settings.EPOCH + 1)):
+    for epoch in (range(1, settings.EPOCH + 1)):
         if epoch > args.warm:
             train_scheduler.step(epoch)
 
