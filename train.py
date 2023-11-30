@@ -11,7 +11,7 @@ import sys
 import argparse
 import time
 from datetime import datetime
-
+import tqdm as tqdm_module
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,15 +21,22 @@ import torchvision.transforms as transforms
 
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 
 from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights
 
+
+
+
 def train(epoch):
 
     start = time.time()
     net.train()
+    correct_train = 0.0
+    total_train = 0
+
     for batch_index, (images, labels) in enumerate(cifar100_training_loader):
 
         if args.gpu:
@@ -42,37 +49,41 @@ def train(epoch):
         loss.backward()
         optimizer.step()
 
+        train_losses=loss.item()/len(cifar100_training_loader)
+
+        _, predicted_train = outputs.max(1)
+        correct_train += predicted_train.eq(labels).sum().item()
+        total_train += labels.size(0)
+
         n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
 
         last_layer = list(net.children())[-1]
-        for name, para in last_layer.named_parameters():
-            if 'weight' in name:
-                writer.add_scalar('LastLayerGradients/grad_norm2_weights', para.grad.norm(), n_iter)
-            if 'bias' in name:
-                writer.add_scalar('LastLayerGradients/grad_norm2_bias', para.grad.norm(), n_iter)
 
-        print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tLoss: {:0.4f}\tLR: {:0.6f}'.format(
-            loss.item(),
-            optimizer.param_groups[0]['lr'],
-            epoch=epoch,
-            trained_samples=batch_index * args.b + len(images),
-            total_samples=len(cifar100_training_loader.dataset)
-        ))
+
+        # print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tLoss: {:0.4f}\tLR: {:0.6f}'.format(
+        #     loss.item(),
+        #     optimizer.param_groups[0]['lr'],
+        #     epoch=epoch,
+        #     trained_samples=batch_index * args.b + len(images),
+        #     total_samples=len(cifar100_training_loader.dataset)
+        # ))
 
         #update training loss for each iteration
-        writer.add_scalar('Train/loss', loss.item(), n_iter)
 
         if epoch <= args.warm:
             warmup_scheduler.step()
 
+        train_accuracy = correct_train / len(cifar100_training_loader.dataset)
+        # print('Training Accuracy for Epoch {}: {:.4f}'.format(epoch, train_accuracy))
+
     for name, param in net.named_parameters():
         layer, attr = os.path.splitext(name)
         attr = attr[1:]
-        writer.add_histogram("{}/{}".format(layer, attr), param, epoch)
 
     finish = time.time()
 
-    print('epoch {} training time consumed: {:.2f}s'.format(epoch, finish - start))
+    # print('epoch {} training time consumed: {:.2f}s'.format(epoch, finish - start))
+    return train_losses,train_accuracy
 
 @torch.no_grad()
 def eval_training(epoch=0, tb=True):
@@ -96,10 +107,11 @@ def eval_training(epoch=0, tb=True):
         _, preds = outputs.max(1)
         correct += preds.eq(labels).sum()
 
+
+        test_losses= (test_loss/ len(cifar100_test_loader.dataset))
+        test_acc = correct.float() / len(cifar100_test_loader.dataset)
+
     finish = time.time()
-    if args.gpu:
-        print('GPU INFO.....')
-        print(torch.cuda.memory_summary(), end='')
     print('Evaluating Network.....')
     print('Test set: Epoch: {}, Average loss: {:.4f}, Accuracy: {:.4f}, Time consumed:{:.2f}s'.format(
         epoch,
@@ -109,12 +121,7 @@ def eval_training(epoch=0, tb=True):
     ))
     print()
 
-    #add informations to tensorboard
-    if tb:
-        writer.add_scalar('Test/Average loss', test_loss / len(cifar100_test_loader.dataset), epoch)
-        writer.add_scalar('Test/Accuracy', correct.float() / len(cifar100_test_loader.dataset), epoch)
-
-    return correct.float() / len(cifar100_test_loader.dataset)
+    return test_losses,test_acc,correct.float() / len(cifar100_test_loader.dataset)
 
 if __name__ == '__main__':
 
@@ -128,6 +135,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     net = get_network(args)
+    
+    # Add these lines at the beginning
+    train_loss_list = []
+    test_loss_list = []
+    train_accuracy_list = []
+    test_accuracy_list = []
+
 
     #data preprocessing:
     cifar100_training_loader = get_training_dataloader(
@@ -166,14 +180,10 @@ if __name__ == '__main__':
     if not os.path.exists(settings.LOG_DIR):
         os.mkdir(settings.LOG_DIR)
 
-    #since tensorboard can't overwrite old values
-    #so the only way is to create a new tensorboard log
-    writer = SummaryWriter(log_dir=os.path.join(
-            settings.LOG_DIR, args.net, settings.TIME_NOW))
+   
     input_tensor = torch.Tensor(1, 3, 32, 32)
     if args.gpu:
         input_tensor = input_tensor.cuda()
-    writer.add_graph(net, input_tensor)
 
     #create checkpoint folder to save model
     if not os.path.exists(checkpoint_path):
@@ -201,7 +211,7 @@ if __name__ == '__main__':
         resume_epoch = last_epoch(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
 
 
-    for epoch in range(1, settings.EPOCH + 1):
+    for epoch in tqdm_module(range(1, settings.EPOCH + 1)):
         if epoch > args.warm:
             train_scheduler.step(epoch)
 
@@ -209,8 +219,13 @@ if __name__ == '__main__':
             if epoch <= resume_epoch:
                 continue
 
-        train(epoch)
-        acc = eval_training(epoch)
+        train_losses, train_accs=train(epoch)
+        test_losses, test_accs,acc = eval_training(epoch)
+
+        train_loss_list.append(train_losses)
+        train_accuracy_list.append(train_accs)
+        test_loss_list.append(test_losses)
+        test_accuracy_list.append(test_accs)
 
         #start to save best performance model after learning rate decay to 0.01
         if epoch > settings.MILESTONES[1] and best_acc < acc:
@@ -225,4 +240,29 @@ if __name__ == '__main__':
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
 
-    writer.close()
+
+    # Add these lines after the training loop
+    plt.figure(figsize=(10, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot([float(x) for x in train_loss_list], label='Train')
+    plt.plot([float(x) for x in test_loss_list], label='Test')
+    plt.title('Train-Test Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # Plot accuracy
+    plt.subplot(1, 2, 2)
+    plt.plot([float(x) for x in train_accuracy_list], label='Train')
+    plt.plot([float(x) for x in test_accuracy_list], label='Test')
+    plt.title('Train-Test Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig('training_plots.png')
+    plt.show()
+            
+
