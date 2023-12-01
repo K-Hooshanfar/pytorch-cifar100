@@ -27,8 +27,6 @@ from utils import get_network, get_training_dataloader, get_test_dataloader, War
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights
 
 
-
-
 def train(epoch):
 
     start = time.time()
@@ -58,30 +56,17 @@ def train(epoch):
 
         last_layer = list(net.children())[-1]
 
-
-        # print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tLoss: {:0.4f}\tLR: {:0.6f}'.format(
-        #     loss.item(),
-        #     optimizer.param_groups[0]['lr'],
-        #     epoch=epoch,
-        #     trained_samples=batch_index * args.b + len(images),
-        #     total_samples=len(cifar100_training_loader.dataset)
-        # ))
-
         #update training loss for each iteration
 
         if epoch <= args.warm:
             warmup_scheduler.step()
 
         train_accuracy = correct_train / len(cifar100_training_loader.dataset)
-        # print('Training Accuracy for Epoch {}: {:.4f}'.format(epoch, train_accuracy))
 
     for name, param in net.named_parameters():
         layer, attr = os.path.splitext(name)
         attr = attr[1:]
 
-    finish = time.time()
-
-    # print('epoch {} training time consumed: {:.2f}s'.format(epoch, finish - start))
     return train_losses,train_accuracy
 
 @torch.no_grad()
@@ -90,10 +75,10 @@ def eval_training(epoch=0, tb=True):
     start = time.time()
     net.eval()
 
-    test_loss = 0.0 # cost function error
+    val_loss = 0.0 # cost function error
     correct = 0.0
 
-    for (images, labels) in cifar100_test_loader:
+    for (images, labels) in cifar100_val_loader:
 
         if args.gpu:
             images = images.cuda()
@@ -102,25 +87,24 @@ def eval_training(epoch=0, tb=True):
         outputs = net(images)
         loss = loss_function(outputs, labels)
 
-        test_loss += loss.item()
+        val_loss += loss.item()
         _, preds = outputs.max(1)
         correct += preds.eq(labels).sum()
 
-
-        test_losses= (test_loss/ len(cifar100_test_loader.dataset))
-        test_acc = correct.float() / len(cifar100_test_loader.dataset)
+        val_losses= (val_loss/ len(cifar100_val_loader.dataset))
+        val_acc = correct.float() / len(cifar100_val_loader.dataset)
 
     finish = time.time()
     print('Evaluating Network.....')
-    print('Test set: Epoch: {}, Average loss: {:.4f}, Accuracy: {:.4f}, Time consumed:{:.2f}s'.format(
+    print('Val set: Epoch: {}, Average loss: {:.4f}, Accuracy: {:.4f}, Time consumed:{:.2f}s'.format(
         epoch,
-        test_loss / len(cifar100_test_loader.dataset),
-        correct.float() / len(cifar100_test_loader.dataset),
+        val_loss / len(cifar100_val_loader.dataset),
+        correct.float() / len(cifar100_val_loader.dataset),
         finish - start
     ))
     print()
 
-    return test_losses,test_acc,correct.float() / len(cifar100_test_loader.dataset)
+    return val_losses,val_acc,correct.float() / len(cifar100_val_loader.dataset)
 
 if __name__ == '__main__':
 
@@ -137,13 +121,13 @@ if __name__ == '__main__':
     
     # Add these lines at the beginning
     train_loss_list = []
-    test_loss_list = []
+    val_loss_list = []
     train_accuracy_list = []
-    test_accuracy_list = []
+    val_accuracy_list = []
 
 
     #data preprocessing:
-    cifar100_training_loader = get_training_dataloader(
+    cifar100_training_loader,cifar100_val_loader = get_training_dataloader(
         settings.CIFAR100_TRAIN_MEAN,
         settings.CIFAR100_TRAIN_STD,
         num_workers=4,
@@ -151,13 +135,13 @@ if __name__ == '__main__':
         shuffle=True
     )
 
-    cifar100_test_loader = get_test_dataloader(
-        settings.CIFAR100_TRAIN_MEAN,
-        settings.CIFAR100_TRAIN_STD,
-        num_workers=4,
-        batch_size=args.b,
-        shuffle=True
-    )
+    # cifar100_test_loader = get_test_dataloader(
+    #     settings.CIFAR100_TRAIN_MEAN,
+    #     settings.CIFAR100_TRAIN_STD,
+    #     num_workers=4,
+    #     batch_size=args.b,
+    #     shuffle=True
+    # )
 
     loss_function = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -175,11 +159,9 @@ if __name__ == '__main__':
     else:
         checkpoint_path = os.path.join(settings.CHECKPOINT_PATH, args.net, settings.TIME_NOW)
 
-    #use tensorboard
     if not os.path.exists(settings.LOG_DIR):
         os.mkdir(settings.LOG_DIR)
 
-   
     input_tensor = torch.Tensor(1, 3, 32, 32)
     if args.gpu:
         input_tensor = input_tensor.cuda()
@@ -219,12 +201,12 @@ if __name__ == '__main__':
                 continue
 
         train_losses, train_accs=train(epoch)
-        test_losses, test_accs,acc = eval_training(epoch)
+        val_losses, val_accs,acc = eval_training(epoch)
 
         train_loss_list.append(train_losses)
         train_accuracy_list.append(train_accs)
-        test_loss_list.append(test_losses)
-        test_accuracy_list.append(test_accs)
+        val_loss_list.append(val_losses)
+        val_accuracy_list.append(val_accs)
 
         #start to save best performance model after learning rate decay to 0.01
         if epoch > settings.MILESTONES[1] and best_acc < acc:
@@ -240,13 +222,14 @@ if __name__ == '__main__':
             torch.save(net.state_dict(), weights_path)
 
 
-    # Add these lines after the training loop
+
     plt.figure(figsize=(10, 5))
 
+    # Plot loss
     plt.subplot(1, 2, 1)
     plt.plot([float(x) for x in train_loss_list], label='Train')
-    plt.plot([float(x) for x in test_loss_list], label='Test')
-    plt.title('Train-Test Loss')
+    plt.plot([float(x) for x in val_loss_list], label='Val')
+    plt.title('Train-Val Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
@@ -254,8 +237,8 @@ if __name__ == '__main__':
     # Plot accuracy
     plt.subplot(1, 2, 2)
     plt.plot([float(x) for x in train_accuracy_list], label='Train')
-    plt.plot([float(x) for x in test_accuracy_list], label='Test')
-    plt.title('Train-Test Accuracy')
+    plt.plot([float(x) for x in val_accuracy_list], label='Val')
+    plt.title('Train-Val Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
     plt.legend()
