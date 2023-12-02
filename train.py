@@ -1,11 +1,3 @@
-# train.py
-#!/usr/bin/env	python3
-
-""" train network using pytorch
-
-author baiyu
-"""
-
 import os
 import sys
 import argparse
@@ -17,83 +9,90 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
-
 from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights
 
-
+# Function to train the model for one epoch
 def train(epoch):
-
-    start = time.time()
+    # Set the model to training mode
     net.train()
     correct_train = 0.0
     total_train = 0
 
     for batch_index, (images, labels) in enumerate(cifar100_training_loader):
-
+        # Move data to GPU if available
         if args.gpu:
             labels = labels.cuda()
             images = images.cuda()
 
+        # Zero the gradients
         optimizer.zero_grad()
+
+        # Forward pass
         outputs = net(images)
+        
+        # Compute the loss
         loss = loss_function(outputs, labels)
+        
+        # Backward pass
         loss.backward()
         optimizer.step()
 
-        train_losses=loss.item()/len(cifar100_training_loader)
-
+        # Compute and track accuracy
         _, predicted_train = outputs.max(1)
         correct_train += predicted_train.eq(labels).sum().item()
         total_train += labels.size(0)
 
         n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
 
+        # Warm-up learning rate if applicable
         last_layer = list(net.children())[-1]
-
-        #update training loss for each iteration
-
         if epoch <= args.warm:
             warmup_scheduler.step()
 
+        # Compute training accuracy
         train_accuracy = correct_train / len(cifar100_training_loader.dataset)
 
+    # Log parameters for each layer
     for name, param in net.named_parameters():
         layer, attr = os.path.splitext(name)
         attr = attr[1:]
 
-    return train_losses,train_accuracy
+    return loss.item() / len(cifar100_training_loader), train_accuracy
 
+# Function to evaluate the model on the validation set
 @torch.no_grad()
 def eval_training(epoch=0, tb=True):
-
-    start = time.time()
+    # Set the model to evaluation mode
     net.eval()
-
-    val_loss = 0.0 # cost function error
+    val_loss = 0.0
     correct = 0.0
 
     for (images, labels) in cifar100_val_loader:
-
+        # Move data to GPU if available
         if args.gpu:
             images = images.cuda()
             labels = labels.cuda()
 
+        # Forward pass
         outputs = net(images)
+        
+        # Compute the loss
         loss = loss_function(outputs, labels)
-
         val_loss += loss.item()
+
+        # Compute and track accuracy
         _, preds = outputs.max(1)
         correct += preds.eq(labels).sum()
 
-        val_losses= (val_loss/ len(cifar100_val_loader.dataset))
+        val_losses = (val_loss / len(cifar100_val_loader.dataset))
         val_acc = correct.float() / len(cifar100_val_loader.dataset)
 
+    # Print evaluation results
     finish = time.time()
     print('Evaluating Network.....')
     print('Val set: Epoch: {}, Average loss: {:.4f}, Accuracy: {:.4f}, Time consumed:{:.2f}s'.format(
@@ -104,10 +103,10 @@ def eval_training(epoch=0, tb=True):
     ))
     print()
 
-    return val_losses,val_acc,correct.float() / len(cifar100_val_loader.dataset)
+    return val_losses, val_acc, correct.float() / len(cifar100_val_loader.dataset)
 
 if __name__ == '__main__':
-
+    # Parse command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('-net', type=str, required=True, help='net type')
     parser.add_argument('-gpu', action='store_true', default=False, help='use gpu or not')
@@ -117,17 +116,17 @@ if __name__ == '__main__':
     parser.add_argument('-resume', action='store_true', default=False, help='resume training')
     args = parser.parse_args()
 
+    # Get the neural network model
     net = get_network(args)
     
-    # Add these lines at the beginning
+    # Lists to store training and validation losses, accuracies
     train_loss_list = []
     val_loss_list = []
     train_accuracy_list = []
     val_accuracy_list = []
 
-
-    #data preprocessing:
-    cifar100_training_loader,cifar100_val_loader = get_training_dataloader(
+    # Data preprocessing
+    cifar100_training_loader, cifar100_val_loader = get_training_dataloader(
         settings.CIFAR100_TRAIN_MEAN,
         settings.CIFAR100_TRAIN_STD,
         num_workers=4,
@@ -135,20 +134,14 @@ if __name__ == '__main__':
         shuffle=True
     )
 
-    # cifar100_test_loader = get_test_dataloader(
-    #     settings.CIFAR100_TRAIN_MEAN,
-    #     settings.CIFAR100_TRAIN_STD,
-    #     num_workers=4,
-    #     batch_size=args.b,
-    #     shuffle=True
-    # )
-
+    # Loss function, optimizer, and learning rate scheduler setup
     loss_function = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-    train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=settings.MILESTONES, gamma=0.2) #learning rate decay
+    train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=settings.MILESTONES, gamma=0.2)
     iter_per_epoch = len(cifar100_training_loader)
     warmup_scheduler = WarmUpLR(optimizer, iter_per_epoch * args.warm)
 
+    # Checkpointing and logging setup
     if args.resume:
         recent_folder = most_recent_folder(os.path.join(settings.CHECKPOINT_PATH, args.net), fmt=settings.DATE_FORMAT)
         if not recent_folder:
@@ -166,13 +159,14 @@ if __name__ == '__main__':
     if args.gpu:
         input_tensor = input_tensor.cuda()
 
-    #create checkpoint folder to save model
+    # Create checkpoint folder to save model
     if not os.path.exists(checkpoint_path):
         os.makedirs(checkpoint_path)
     checkpoint_path = os.path.join(checkpoint_path, '{net}-{epoch}-{type}.pth')
 
     best_acc = 0.0
     if args.resume:
+        # Load the best weights for evaluation
         best_weights = best_acc_weights(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
         if best_weights:
             weights_path = os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder, best_weights)
@@ -182,6 +176,7 @@ if __name__ == '__main__':
             best_acc = eval_training(tb=False)
             print('best acc is {:0.2f}'.format(best_acc))
 
+        # Load the most recent weights for resuming training
         recent_weights_file = most_recent_weights(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
         if not recent_weights_file:
             raise Exception('no recent weights file were found')
@@ -189,10 +184,11 @@ if __name__ == '__main__':
         print('loading weights file {} to resume training.....'.format(weights_path))
         net.load_state_dict(torch.load(weights_path))
 
+        # Get the last epoch for resuming training
         resume_epoch = last_epoch(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
 
-
-    for epoch in (range(1, settings.EPOCH + 1)):
+    # Main training loop
+    for epoch in range(1, settings.EPOCH + 1):
         if epoch > args.warm:
             train_scheduler.step(epoch)
 
@@ -200,15 +196,16 @@ if __name__ == '__main__':
             if epoch <= resume_epoch:
                 continue
 
-        train_losses, train_accs=train(epoch)
-        val_losses, val_accs,acc = eval_training(epoch)
+        train_losses, train_accs = train(epoch)
+        val_losses, val_accs, acc = eval_training(epoch)
 
+        # Append training and validation metrics to lists
         train_loss_list.append(train_losses)
         train_accuracy_list.append(train_accs)
         val_loss_list.append(val_losses)
         val_accuracy_list.append(val_accs)
 
-        #start to save best performance model after learning rate decay to 0.01
+        # Save the model with the best validation accuracy
         if epoch > settings.MILESTONES[1] and best_acc < acc:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='best')
             print('saving weights file to {}'.format(weights_path))
@@ -216,13 +213,13 @@ if __name__ == '__main__':
             best_acc = acc
             continue
 
+        # Save the model at regular intervals
         if not epoch % settings.SAVE_EPOCH:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='regular')
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
 
-
-
+    # Plot training and validation metrics
     plt.figure(figsize=(10, 5))
 
     # Plot loss
@@ -246,5 +243,3 @@ if __name__ == '__main__':
     plt.tight_layout()
     plt.savefig('training_plots.png')
     plt.show()
-            
-
